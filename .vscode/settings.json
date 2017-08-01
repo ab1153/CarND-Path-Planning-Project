@@ -1,0 +1,9 @@
+// Place your settings in this file to overwrite default and user settings.
+{
+    "C_Cpp.formatting": "Default",
+    "C_Cpp.clang_format_style": "Google",
+    "editor.autoIndent": true,
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false
+}
