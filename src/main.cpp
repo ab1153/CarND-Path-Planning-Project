@@ -7,8 +7,8 @@
 #include <vector>
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
+#include "jmt.hpp"
 #include "json.hpp"
-
 using namespace std;
 
 // for convenience
@@ -213,6 +213,7 @@ int main() {
           // Previous path data given to the Planner
           auto previous_path_x = j[1]["previous_path_x"];
           auto previous_path_y = j[1]["previous_path_y"];
+
           // Previous path's end s and d values
           double end_path_s = j[1]["end_path_s"];
           double end_path_d = j[1]["end_path_d"];
@@ -221,6 +222,16 @@ int main() {
           // the road.
           auto sensor_fusion = j[1]["sensor_fusion"];
 
+          for (auto &sensor_data : sensor_fusion) {
+            double id = sensor_data[0];
+            double x = sensor_data[1];
+            double y = sensor_data[2];
+            double vx = sensor_data[3];
+            double vy = sensor_data[4];
+            double s = sensor_data[5];
+            double d = sensor_data[6];
+          }
+
           json msgJson;
 
           vector<double> next_x_vals;
@@ -228,11 +239,49 @@ int main() {
 
           // TODO: define a path made up of (x,y) points that the car will visit
           // sequentially every .02 seconds
-          msgJson["next_x"] = next_x_vals;
-          msgJson["next_y"] = next_y_vals;
+          static bool started = false;
+          static double s = car_s;
+          static double d = 6;
+
+          double dist_inc = 0.4;
+          if (!started) {
+            cout << "initial s: " << s << endl;
+          }
+
+          int timestep = 250;
+          double n_cycles = 50.;
+          vector<double> start = {0, 0, 0};
+          vector<double> end = {125, 50, 10};
+          auto jmt = JMT(start, end, timestep / n_cycles);
+          // for (auto v: jmt) {
+          //   cout << v << endl;
+          // }
+
+          if (!started) {
+            for (int i = 0; i < timestep; i++) {
+              double T = i / n_cycles;
+              double fwd = eval_JMT(jmt, T);
+
+              // s += dist_inc;
+              // cout << "time: " << T << " --- ego_s: " << s + fwd << endl;
+              // vector<double> XY = getXY(s + fwd, d, map_waypoints_s,
+              //                           map_waypoints_x, map_waypoints_y);
+              // next_x_vals.push_back(XY[0]);
+              // next_y_vals.push_back(XY[1]);
+          next_x_vals.push_back(car_x+(fwd)*cos(deg2rad(car_yaw)));
+          next_y_vals.push_back(car_y+(fwd)*sin(deg2rad(car_yaw)));              
+            }
+
+            msgJson["next_x"] = next_x_vals;
+            msgJson["next_y"] = next_y_vals;
+          } else {
+            msgJson["next_x"] = previous_path_x;
+            msgJson["next_y"] = previous_path_y;
+          }
+
+          started = true;
 
           auto msg = "42[\"control\"," + msgJson.dump() + "]";
-
           // this_thread::sleep_for(chrono::milliseconds(1000));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
         }
