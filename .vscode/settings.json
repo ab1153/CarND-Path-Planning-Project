@@ -32,6 +32,7 @@
       "dense": "cpp",
       "fft": "cpp",
       "xlocale": "cpp",
-      "chrono": "cpp"
+      "chrono": "cpp",
+      "xcomplex": "cpp"
     }
   }

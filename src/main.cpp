@@ -6,10 +6,16 @@
 #include <thread>
 #include <vector>
 #include "Eigen-3.3/Eigen/Core"
+#include "Eigen-3.3/Eigen/Dense"
 #include "Eigen-3.3/Eigen/QR"
+
+#include "car.hpp"
 #include "jmt.hpp"
 #include "json.hpp"
+#include "spline.h"
+
 using namespace std;
+using namespace Eigen;
 
 // for convenience
 using json = nlohmann::json;
@@ -223,64 +229,151 @@ int main() {
           auto sensor_fusion = j[1]["sensor_fusion"];
 
           for (auto &sensor_data : sensor_fusion) {
-            double id = sensor_data[0];
+            int id = sensor_data[0];
             double x = sensor_data[1];
             double y = sensor_data[2];
             double vx = sensor_data[3];
             double vy = sensor_data[4];
             double s = sensor_data[5];
             double d = sensor_data[6];
+
+            // double v = sqrt(vx * vx + vy * vy);
+            // vector<double> vsvd = getXY(vx, vy, map_waypoints_s,
+            //                             map_waypoints_x, map_waypoints_y);
+            // cars.emplace_back(id, s, d, v);
           }
 
-          json msgJson;
+          int lane = 1;
 
+          int prev_size = previous_path_x.size();
+          int next_wp = -1;
+          double ref_x = car_x;
+          double ref_y = car_y;
+          double ref_yaw = deg2rad(car_yaw);
+
+          vector<double> ptsx;
+          vector<double> ptsy;
+
+          if (prev_size < 2) {
+            double prev_car_x = car_x - cos(ref_yaw);
+            double prev_car_y = car_y - sin(ref_yaw);
+
+            ptsx.push_back(prev_car_x);
+            ptsx.push_back(car_x);
+
+            ptsy.push_back(prev_car_y);
+            ptsy.push_back(car_y);
+          } else {
+            ref_x = previous_path_x[prev_size - 1];
+            double ref_x_prev = previous_path_x[prev_size - 2];
+            ref_y = previous_path_y[prev_size - 1];
+            double ref_y_prev = previous_path_y[prev_size - 2];
+            ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+
+            ptsx.push_back(ref_x_prev);
+            ptsx.push_back(ref_x);
+            ptsy.push_back(ref_y_prev);
+            ptsy.push_back(ref_y);
+
+            car_s = end_path_s;
+          }
+
+          vector<double> next_wp0 =
+              getXY(car_s + 30, (2 + 4 * lane), map_waypoints_s,
+                    map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp1 =
+              getXY(car_s + 60, (2 + 4 * lane), map_waypoints_s,
+                    map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp2 =
+              getXY(car_s + 90, (2 + 4 * lane), map_waypoints_s,
+                    map_waypoints_x, map_waypoints_y);
+
+          ptsx.push_back(next_wp0[0]);
+          ptsx.push_back(next_wp1[0]);
+          ptsx.push_back(next_wp2[0]);
+          ptsy.push_back(next_wp0[1]);
+          ptsy.push_back(next_wp1[1]);
+          ptsy.push_back(next_wp2[1]);
+
+          Matrix3d m_rot;
+          m_rot << cos(ref_yaw), -sin(ref_yaw), 0., sin(ref_yaw), cos(ref_yaw),
+              0, 0., 0., 1.;
+
+          Matrix3d m_trans;
+          m_trans << 1., 0., ref_x, 0., 1., ref_y, 0., 0., 1.;
+
+          Matrix3d m_transform = m_trans * m_rot;
+          Matrix3d m_coord = m_transform.inverse();
+
+          for (int i = 0; i < ptsx.size(); i++) {
+            Vector3d v;
+            v << ptsx[i], ptsy[i], 1.;
+            Vector3d p = m_coord * v;
+            ptsx[i] = p(0);
+            ptsy[i] = p(1);
+          }
+
+          // for (int i = 0; i < ptsx.size(); i++) {
+          //   // shift car reference angle to 0 degrees
+          //   double shift_x = ptsx[i] - ref_x;
+          //   double shift_y = ptsy[i] - ref_y;
+
+          //   ptsx[i] = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 -
+          //   ref_yaw));
+          //   ptsy[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 -
+          //   ref_yaw));
+          // }
+
+          // drive
+          json msgJson;
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
-          // TODO: define a path made up of (x,y) points that the car will visit
-          // sequentially every .02 seconds
-          static bool started = false;
-          static double s = car_s;
-          static double d = 6;
+          tk::spline spline;
+          spline.set_points(ptsx, ptsy);
+          cout << "set !!" << endl;
 
-          double dist_inc = 0.4;
-          if (!started) {
-            cout << "initial s: " << s << endl;
+          for (int i = 0; i < previous_path_x.size(); i++) {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
           }
 
-          int timestep = 250;
-          double n_cycles = 50.;
-          vector<double> start = {0, 0, 0};
-          vector<double> end = {125, 50, 10};
-          auto jmt = JMT(start, end, timestep / n_cycles);
-          // for (auto v: jmt) {
-          //   cout << v << endl;
-          // }
+          double target_x = 30.0;
+          double target_y = spline(target_x);
+          double target_dist =
+              sqrt((target_x) * (target_x) + (target_y) * (target_y));
 
-          if (!started) {
-            for (int i = 0; i < timestep; i++) {
-              double T = i / n_cycles;
-              double fwd = eval_JMT(jmt, T);
+          double x_add_on = 0;
+          double ref_vec = 49.5;
 
-              // s += dist_inc;
-              // cout << "time: " << T << " --- ego_s: " << s + fwd << endl;
-              // vector<double> XY = getXY(s + fwd, d, map_waypoints_s,
-              //                           map_waypoints_x, map_waypoints_y);
-              // next_x_vals.push_back(XY[0]);
-              // next_y_vals.push_back(XY[1]);
-          next_x_vals.push_back(car_x+(fwd)*cos(deg2rad(car_yaw)));
-          next_y_vals.push_back(car_y+(fwd)*sin(deg2rad(car_yaw)));              
-            }
+          for (int i = 1; i <= 50 - previous_path_x.size(); i++) {
+            double N = (target_dist / (.02 * ref_vec / 2.24));
+            double x_point = x_add_on + (target_x) / N;
+            double y_point = spline(x_point);
 
-            msgJson["next_x"] = next_x_vals;
-            msgJson["next_y"] = next_y_vals;
-          } else {
-            msgJson["next_x"] = previous_path_x;
-            msgJson["next_y"] = previous_path_y;
+            x_add_on = x_point;
+
+            double x_ref = x_point;
+            double y_ref = y_point;
+
+            // x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+            // y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+
+            // x_point += ref_x;
+            // y_point += ref_y;
+
+            Vector3d v;
+            v << x_point, y_point, 1.;
+            Vector3d p = m_transform * v;
+            next_x_vals.push_back(p(0));
+            next_y_vals.push_back(p(1));
+
+            // next_x_vals.push_back(x_point);
+            // next_y_vals.push_back(y_point);
           }
 
-          started = true;
-
+          msgJson["next_x"] = next_x_vals;
+          msgJson["next_y"] = next_y_vals;
           auto msg = "42[\"control\"," + msgJson.dump() + "]";
           // this_thread::sleep_for(chrono::milliseconds(1000));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);

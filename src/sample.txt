@@ -1,0 +1,58 @@
+          json msgJson;
+
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+
+          // TODO: define a path made up of (x,y) points that the car will visit
+          // sequentially every .02 seconds
+          static bool started = false;
+          static double s = car_s;
+          static double d = 6;
+
+          double dist_inc = 0.4;
+          if (!started) {
+            cout << "initial s: " << s << endl;
+          }
+
+          int timestep = 250;
+          double n_cycles = 50.;
+          vector<double> start = {0, 0, 0};
+          vector<double> end = {125, 50, 10};
+          auto jmt = JMT(start, end, timestep / n_cycles);
+          // for (auto v: jmt) {
+          //   cout << v << endl;
+          // }
+
+          if (!started) {
+            for (int i = 0; i < timestep; i++) {
+              double T = i / n_cycles;
+              double fwd = eval_JMT(jmt, T);
+
+              // s += dist_inc;
+              // cout << "time: " << T << " --- ego_s: " << s + fwd << endl;
+              // vector<double> XY = getXY(s + fwd, d, map_waypoints_s,
+              //                           map_waypoints_x, map_waypoints_y);
+              // next_x_vals.push_back(XY[0]);
+              // next_y_vals.push_back(XY[1]);
+              next_x_vals.push_back(car_x + (fwd)*cos(deg2rad(car_yaw)));
+              next_y_vals.push_back(car_y + (fwd)*sin(deg2rad(car_yaw)));
+            }
+
+            msgJson["next_x"] = next_x_vals;
+            msgJson["next_y"] = next_y_vals;
+          } else {
+            msgJson["next_x"] = previous_path_x;
+            msgJson["next_y"] = previous_path_y;
+          }
+
+          started = true;
+
+          auto msg = "42[\"control\"," + msgJson.dump() + "]";
+          // this_thread::sleep_for(chrono::milliseconds(1000));
+          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+        }
+      } else {
+        // Manual driving
+        std::string msg = "42[\"manual\",{}]";
+        ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+      }
