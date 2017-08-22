@@ -33,6 +33,7 @@
       "fft": "cpp",
       "xlocale": "cpp",
       "chrono": "cpp",
-      "xcomplex": "cpp"
+      "xcomplex": "cpp",
+      "qr": "cpp"
     }
   }

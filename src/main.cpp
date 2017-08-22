@@ -1,3 +1,4 @@
+#include <float.h>
 #include <math.h>
 #include <uWS/uWS.h>
 #include <chrono>
@@ -188,10 +189,12 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
+  int lane = 1;
+
   h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s,
-               &map_waypoints_dx,
-               &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data,
-                                  size_t length, uWS::OpCode opCode) {
+               &map_waypoints_dx, &map_waypoints_dy,
+               &lane](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -236,23 +239,20 @@ int main() {
             double vy = sensor_data[4];
             double s = sensor_data[5];
             double d = sensor_data[6];
-
-            // double v = sqrt(vx * vx + vy * vy);
-            // vector<double> vsvd = getXY(vx, vy, map_waypoints_s,
-            //                             map_waypoints_x, map_waypoints_y);
-            // cars.emplace_back(id, s, d, v);
           }
 
-          int lane = 1;
-
           int prev_size = previous_path_x.size();
-          int next_wp = -1;
           double ref_x = car_x;
           double ref_y = car_y;
           double ref_yaw = deg2rad(car_yaw);
+          const double max_speed = 49. * 1.609344 * 1000 / 3600;
+          double target_velc = max_speed;
 
           vector<double> ptsx;
           vector<double> ptsy;
+
+          // car_speed in m/s
+          car_speed *= 1.609344 * 1000 / 3600;
 
           if (prev_size < 2) {
             double prev_car_x = car_x - cos(ref_yaw);
@@ -260,7 +260,6 @@ int main() {
 
             ptsx.push_back(prev_car_x);
             ptsx.push_back(car_x);
-
             ptsy.push_back(prev_car_y);
             ptsy.push_back(car_y);
           } else {
@@ -276,6 +275,100 @@ int main() {
             ptsy.push_back(ref_y);
 
             car_s = end_path_s;
+
+            double current_speed =
+                (sqrt((ref_x - ref_x_prev) * (ref_x - ref_x_prev) +
+                      (ref_y - ref_y_prev) * (ref_y - ref_y_prev)) /
+                 .02);
+
+            car_speed = current_speed;
+          }
+
+          // find the target velocity from the closest car
+          double closest_dist = DBL_MAX;
+          bool change_lanes = false;
+
+          for (int i = 0; i < sensor_fusion.size(); i++) {
+            float d = sensor_fusion[i][6];
+            if (d < (2 + 4 * lane + 2) && d > (2 + 4 * lane - 2)) {
+              double vx = sensor_fusion[i][3];
+              double vy = sensor_fusion[i][4];
+              double check_speed = sqrt(vx * vx + vy * vy);
+              double check_car_s = sensor_fusion[i][5];
+              // make prediction
+              check_car_s += prev_size * .02 * check_speed;
+
+              if ((check_car_s > car_s) && ((check_car_s - car_s) < 30) &&
+                  ((check_car_s - car_s) < closest_dist)) {
+                closest_dist = check_car_s - car_s;
+
+                change_lanes = true;
+                
+                if ((check_car_s - car_s) > 20) {
+                  target_velc = check_speed;
+                } else {
+                  target_velc = check_speed * 0.8;
+                }
+              }
+            }
+          }
+
+          if (!change_lanes) target_velc = max_speed;
+
+          bool changed_lanes = false;
+
+          if (change_lanes) {
+            // try the left lane
+            if (lane != 0 && !changed_lanes) {
+              bool lane_safe = true;
+              for (int i = 0; i < sensor_fusion.size(); i++) {
+                float d = sensor_fusion[i][6];
+                if (d < (2 + 4 * (lane - 1) + 2) &&
+                    d > (2 + 4 * (lane - 1) - 2)) {
+                  double vx = sensor_fusion[i][3];
+                  double vy = sensor_fusion[i][4];
+                  double check_speed = sqrt(vx * vx + vy * vy);
+
+                  double check_car_s = sensor_fusion[i][5];
+                  check_car_s += prev_size * .02 * check_speed;
+                  double dist_s = check_car_s - car_s;
+                  if (dist_s < 20 && dist_s > -20) {
+                    lane_safe = false;
+                  }
+                }
+              }
+              if (lane_safe) {
+                changed_lanes = true;
+                lane -= 1;
+              }
+            }
+
+            // try the right lane
+            if (lane != 2 && !changed_lanes) {
+              bool lane_safe = true;
+              for (int i = 0; i < sensor_fusion.size(); i++) {
+                // car is in right lane
+                float d = sensor_fusion[i][6];
+                if (d < (2 + 4 * (lane + 1) + 2) &&
+                    d > (2 + 4 * (lane + 1) - 2)) {
+                  double vx = sensor_fusion[i][3];
+                  double vy = sensor_fusion[i][4];
+                  double check_speed = sqrt(vx * vx + vy * vy);
+
+                  double check_car_s = sensor_fusion[i][5];
+                  check_car_s += prev_size * .02 * check_speed;
+                  double dist_s = check_car_s - car_s;
+                  cout << "dist_s: " << dist_s << endl;
+                  if (dist_s < 20 && dist_s > -20) {
+                    lane_safe = false;
+                  }
+                }
+              }
+              if (lane_safe) {
+                changed_lanes = true;
+                lane += 1;
+              }
+            }
           }
 
           vector<double> next_wp0 =
@@ -295,16 +388,14 @@ int main() {
           ptsy.push_back(next_wp1[1]);
           ptsy.push_back(next_wp2[1]);
 
+          // transform the way points to local coordinates
           Matrix3d m_rot;
           m_rot << cos(ref_yaw), -sin(ref_yaw), 0., sin(ref_yaw), cos(ref_yaw),
               0, 0., 0., 1.;
-
           Matrix3d m_trans;
           m_trans << 1., 0., ref_x, 0., 1., ref_y, 0., 0., 1.;
-
           Matrix3d m_transform = m_trans * m_rot;
           Matrix3d m_coord = m_transform.inverse();
-
           for (int i = 0; i < ptsx.size(); i++) {
             Vector3d v;
             v << ptsx[i], ptsy[i], 1.;
@@ -313,17 +404,6 @@ int main() {
             ptsy[i] = p(1);
           }
 
-          // for (int i = 0; i < ptsx.size(); i++) {
-          //   // shift car reference angle to 0 degrees
-          //   double shift_x = ptsx[i] - ref_x;
-          //   double shift_y = ptsy[i] - ref_y;
-
-          //   ptsx[i] = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 -
-          //   ref_yaw));
-          //   ptsy[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 -
-          //   ref_yaw));
-          // }
-
           // drive
           json msgJson;
           vector<double> next_x_vals;
@@ -331,7 +411,6 @@ int main() {
 
           tk::spline spline;
           spline.set_points(ptsx, ptsy);
-          cout << "set !!" << endl;
 
           for (int i = 0; i < previous_path_x.size(); i++) {
             next_x_vals.push_back(previous_path_x[i]);
@@ -344,10 +423,15 @@ int main() {
               sqrt((target_x) * (target_x) + (target_y) * (target_y));
 
           double x_add_on = 0;
-          double ref_vec = 49.5;
 
           for (int i = 1; i <= 50 - previous_path_x.size(); i++) {
-            double N = (target_dist / (.02 * ref_vec / 2.24));
+            if (car_speed < target_velc) {
+              car_speed += target_velc * 0.02 * 0.2;
+            } else {
+              car_speed -= target_velc * 0.02 * 0.2;
+            }
+
+            double N = (target_dist / (.02 * car_speed));
             double x_point = x_add_on + (target_x) / N;
             double y_point = spline(x_point);
 
@@ -356,20 +440,11 @@ int main() {
             double x_ref = x_point;
             double y_ref = y_point;
 
-            // x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
-            // y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
-
-            // x_point += ref_x;
-            // y_point += ref_y;
-
             Vector3d v;
             v << x_point, y_point, 1.;
             Vector3d p = m_transform * v;
             next_x_vals.push_back(p(0));
             next_y_vals.push_back(p(1));
-
-            // next_x_vals.push_back(x_point);
-            // next_y_vals.push_back(y_point);
           }
 
           msgJson["next_x"] = next_x_vals;
